@@ -1,0 +1,43 @@
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: hooklab
+      MYSQL_USER: hooklab
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Generate .env using scripts/setup.sh}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Generate .env using scripts/setup.sh}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql -h127.0.0.1 -uhooklab hooklab -e 'SELECT 1'"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  api:
+    build: ./backend
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      DATABASE_DSN: hooklab:${MYSQL_PASSWORD}@tcp(db:3306)/hooklab?parseTime=true&charset=utf8mb4&loc=UTC
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      FRONTEND_URL: http://web:80
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    healthcheck:
+      test: ["CMD", "/server", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    depends_on:
+      db:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+  web:
+    build: ./web
+    restart: unless-stopped
+volumes:
+  mysql_data:
