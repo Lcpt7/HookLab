@@ -1,107 +1,174 @@
 # HookLab
 
-面向开发者的 Webhook 调试与事件管理平台。真实接收请求、持久化到 MySQL，在深色工作台中搜索、检查和重放事件。前后端分离，无 ORM、Redis 或额外微服务。
+**Webhook Inspector & Event Replay Platform**
 
-## 已实现
+HookLab 是一个面向开发者的 Webhook 调试与事件管理平台。它可以接收 HTTP Webhook 请求，将请求数据持久化到 MySQL，并提供请求检索、详情检查和事件重放能力。
 
-- 注册、登录、退出；Argon2id 密码哈希，服务端 Session。
-- Endpoint 创建、改名、暂停/恢复和永久删除；独立的 256 位随机 Token。PATCH 省略 `active` 时保持当前状态，显式传入 `false`/`true` 时停用/恢复。
-- 任意 HTTP Method 接收，包括自定义方法；保存方法、路径、Headers（含真实 Host 及端口）、原始 Query、原始 Body、来源 IP 和 UTC 时间。
-- 请求体以 MySQL `MEDIUMBLOB` 存储，API 通过 Base64 传输，保留二进制原始字节。
-- Endpoint 工作区、全部事件、区分大小写的方法筛选、路径/Body 搜索、游标分页，每 5 秒自动刷新。
-- JSON 高亮和格式化、Raw 文本、Headers、Query、原始 Body 下载。页面预览最多 200 行 / 24,000 字符，大文本跳过语法高亮，完整数据仍可下载。
-- 真实 HTTP 重放；保存目标、状态码、耗时与失败原因，在事件详情查看最近 50 次结果。
-- 响应式桌面/移动布局、空状态、加载反馈、操作错误和删除确认。
+项目采用前后端分离架构，提供 Docker Compose 部署方式，适合本地开发、接口调试和学习 Web 后端工程实践。
 
-## 技术架构与目录
+> **项目状态：** v1.0 MVP 已完成。当前版本面向个人开发与受控环境使用；公开部署前请阅读下方的[安全说明](#安全说明)和[当前限制](#当前限制)。
+
+## 功能特性
+
+- **Webhook Endpoint 管理**：创建、重命名、暂停、恢复和删除接收地址；每个 Endpoint 使用独立的随机 Token。
+- **HTTP 请求捕获**：接收标准及自定义 HTTP Method，记录请求方法、路径、Host、Headers、Query、原始 Body、来源 IP 和接收时间。
+- **事件检索**：按 Endpoint、HTTP Method 和内容搜索事件，支持游标分页及自动刷新。
+- **请求检查**：查看 JSON、Raw Body、Headers 和 Query；支持下载原始请求体。
+- **事件重放**：将历史请求发送到指定目标，记录响应状态、耗时和失败原因。
+- **账户与访问控制**：支持注册、登录、退出和基于用户的资源隔离。
+- **审计与安全防护**：记录重放结果；提供 CSRF 防护、请求体限制、敏感请求头脱敏及 SSRF 防护。
+
+## 技术栈
+
+| 层级 | 技术 |
+| --- | --- |
+| 前端 | React、TypeScript、Vite、Tailwind CSS |
+| 后端 | Go、Gin |
+| 数据库 | MySQL 8.4 |
+| 数据访问 | `database/sql`、参数化 SQL、SQL migrations |
+| Web 服务 | Nginx（静态前端） |
+| 容器化 | Docker、Docker Compose |
+| 测试 | Go Test、Race Detector、Playwright |
+
+## 系统架构
 
 ```text
-浏览器 / Webhook → Go + Gin :8080 → MySQL 8.4
-                       └→ 内部 Nginx（静态 React）
+浏览器 ───────┐
+              ├── Go + Gin API ─── MySQL 8.4
+Webhook 客户端┘         │
+                        └── 内部 Nginx（React 静态资源）
 ```
+
+Go 服务负责 API、身份认证、Webhook 接收、事件持久化和重放。Nginx 仅提供前端静态资源；Webhook 请求由 Go 服务直接处理。
+
+### 项目结构
 
 ```text
-backend/
-  cmd/server/           配置、迁移启动、HTTP 生命周期和健康检查
-  internal/app/         认证、CSRF、Endpoint、捕获、查询、重放和安全策略
-  migrations/           嵌入式 SQL 迁移、版本记录与 MySQL advisory lock
-  Dockerfile            Go 构建 → 非 root distroless 运行镜像
-web/
-  src/                  React + TypeScript + Tailwind 工作台
-  tests/                Playwright 真实 API 端到端测试
-  nginx.conf            内部静态资源、CSP
-  Dockerfile            Vite 构建 → Nginx
-scripts/
-  setup.sh              生成随机数据库密码，不覆盖已有 .env
-  test-go.sh            使用真实 MySQL 跑 Go/race 测试
-compose.yaml            三个服务、持久化卷、健康检查和隔离网络
-compose.dev.yaml        仅供本机开发的 MySQL 端口映射
-.env.example            环境变量说明模板，无可用凭证
+.
+├── backend/
+│   ├── cmd/server/       # 服务入口、配置、生命周期与健康检查
+│   ├── internal/app/     # 认证、Endpoint、事件、重放及安全逻辑
+│   ├── migrations/       # SQL 数据库迁移
+│   └── Dockerfile
+├── web/
+│   ├── src/              # React + TypeScript 前端
+│   ├── tests/             # Playwright 端到端测试
+│   ├── nginx.conf
+│   └── Dockerfile
+├── scripts/               # 初始化与测试脚本
+├── docs/                  # 项目文档
+├── compose.yaml            # 默认部署配置
+├── compose.dev.yaml        # 本地开发数据库端口映射
+└── .env.example            # 环境变量模板
 ```
 
-数据库包含 `users`、`sessions`、`endpoints`、`events`、`replays` 和 `schema_migrations`。外键级联删除；邮箱和 Endpoint Token 唯一；索引支持用户 Endpoint、Endpoint 事件 ID/方法、Session 过期时间和事件重放记录查询。查询使用参数绑定，资源查询同时限定所属用户。请求时间存储为 UTC，浏览器按本地时区显示。
+数据库迁移由应用启动时自动执行。当前包含用户、会话、Endpoint、Webhook 事件、重放记录和迁移版本等数据表。
 
-## Docker 启动
+## 快速开始
 
-需要 Docker Engine、支持 BuildKit 的 Docker Compose v2，以及本机的 OpenSSL。
+### 环境要求
+
+- Docker Engine
+- Docker Compose v2（支持 `--wait`）
+- OpenSSL
+- Bash 环境
+
+Windows 用户可以通过 Docker Desktop + WSL2，在 WSL2 终端中执行以下命令。
+
+### 启动服务
+
+克隆仓库并进入项目目录：
+
+```bash
+git clone https://github.com/Lcpt7/HookLab.git
+cd HookLab
+```
+
+初始化本地环境并启动：
 
 ```bash
 ./scripts/setup.sh
 docker compose up -d --build --wait
-docker compose ps
-curl -f http://localhost:8080/healthz
-curl -f http://localhost:8080/readyz
 ```
 
-打开 **http://localhost:8080**，创建自己的账户，再创建 Endpoint。没有预设账户或演示事件。将工作台给出的 URL 填入 Webhook 提供方，或使用界面中的 curl 命令。
+查看容器状态：
 
 ```bash
-curl -X POST 'http://localhost:8080/h/替换为你的TOKEN/orders?version=1' \
+docker compose ps
+```
+
+服务启动后访问：
+
+**http://localhost:8080**
+
+首次使用时注册账户并创建 Endpoint。项目不提供预置账户或演示事件。
+
+### 发送测试请求
+
+在 HookLab 工作台复制 Endpoint URL，或使用以下示例（将 Token 替换为实际值）：
+
+```bash
+curl -X POST 'http://localhost:8080/h/YOUR_TOKEN/orders?version=1' \
   -H 'Content-Type: application/json' \
   -d '{"event":"order.created","amount":2048}'
 ```
 
-接收成功返回 `202 {"id":...,"status":"captured"}`；请求体默认限 1 MiB，超限返回 413。暂停或不存在的 Endpoint 返回 404。
+成功接收时返回 HTTP `202`。默认请求体上限为 1 MiB，超过限制的请求返回 `413`；暂停或不存在的 Endpoint 返回 `404`。
+
+### 常用命令
 
 ```bash
+# 查看服务日志
 docker compose logs -f api web
+
+# 停止服务（保留数据库卷）
 docker compose stop
+
+# 停止并移除容器和网络（保留数据库卷）
+docker compose down
 ```
 
-MySQL 数据保存在 `mysql_data` 卷中。启动 API 时自动运行尚未应用的迁移；重复启动不会重复应用。MySQL DDL 会自动提交，初始迁移可幂等重试；新增变更请添加递增 SQL 文件，不修改已部署迁移。当前不提供破坏性的自动 down 迁移。
+MySQL 数据保存在 Docker 命名卷 `mysql_data` 中。**不要在需要保留数据时执行 `docker compose down -v`，该命令会删除数据卷。**
 
-### 环境变量
+## 配置说明
 
-| 变量 | 用途 / 默认值 |
+`./scripts/setup.sh` 会生成随机数据库密码并创建本地 `.env` 文件；如果文件已存在，不会覆盖。实际凭证不应提交到 Git。
+
+| 变量 | 说明 |
 | --- | --- |
-| `MYSQL_PASSWORD` | 必填；setup 脚本生成随机密码，Compose app 数据库用户使用 |
-| `MYSQL_ROOT_PASSWORD` | 必填；独立随机 root 密码，API 不使用 root |
-| `APP_ORIGIN` | 浏览器完整来源，默认 `http://localhost:8080`，无尾部 `/`；必须与访问地址完全一致 |
-| `COOKIE_SECURE` | 本地 HTTP 用 `false`；HTTPS 部署必须 `true` |
-| `PORT` | 宿主机 Web 端口，默认 `8080`；改端口时同时修改 `APP_ORIGIN` |
-| `MAX_BODY_BYTES` | 默认 `1048576`，允许 1–8388608；由 Go 入口直接限制 |
-| `FRONTEND_URL` | Compose 设为 `http://web:80`；Go 将页面请求转发到内部静态服务；原生 Vite 开发无需设置 |
-| `DATABASE_DSN` | 原生启动 API 必填，包含 `parseTime=true&charset=utf8mb4&loc=UTC`；Compose 自动组装 |
-| `TRUSTED_PROXIES` | 原生 API 可选，逗号分隔的可信 IP/CIDR；默认不信任代理 |
-| `TEST_DATABASE_DSN` | Go 集成测试连接串；test-go.sh 默认使用本机 3306 的 HookLab 数据库 |
-| `GO_BIN` | test-go.sh 可选 Go 可执行文件路径，默认 `go` |
-| `BASE_URL` | Playwright 测试地址，默认 `http://localhost:5173` |
-| `CHROMIUM_PATH` | Playwright 可选浏览器可执行路径；不设置时使用 Playwright 管理的 Chromium |
+| `MYSQL_PASSWORD` | 必填，应用数据库用户密码 |
+| `MYSQL_ROOT_PASSWORD` | 必填，MySQL root 密码；API 不使用 root 账户 |
+| `APP_ORIGIN` | 浏览器访问来源，默认 `http://localhost:8080`；必须与实际访问来源完全一致，不带尾部斜杠 |
+| `COOKIE_SECURE` | 本地 HTTP 使用 `false`；HTTPS 部署必须设为 `true` |
+| `PORT` | 宿主机 Web 端口，默认 `8080`；修改时同步调整 `APP_ORIGIN` |
+| `MAX_BODY_BYTES` | 请求体大小上限，默认 `1048576`，允许范围为 1–8388608 字节 |
+| `FRONTEND_URL` | Compose 内部前端地址，默认由 Compose 配置为 `http://web:80` |
+| `DATABASE_DSN` | 原生启动 API 时使用的 MySQL 连接串；Compose 部署时自动组装 |
+| `TRUSTED_PROXIES` | 可选，可信代理 IP/CIDR 列表；默认不信任转发头 |
+| `TEST_DATABASE_DSN` | Go 集成测试使用的数据库连接串 |
+| `GO_BIN` | 可选，Go 测试脚本使用的 Go 可执行文件路径 |
+| `BASE_URL` | Playwright 测试目标地址，默认 `http://localhost:5173` |
+| `CHROMIUM_PATH` | 可选，指定本机 Chromium 可执行文件路径 |
 
-`.env` 已被 Git 忽略。不要提交它或把数据库密码写入版本控制。生产部署请在 Go 入口前配置 HTTPS，设置真实 `APP_ORIGIN` 和 `COOKIE_SECURE=true`；默认配置面向本地开发。
+生产环境应在 Go 服务前配置 HTTPS，设置正确的 `APP_ORIGIN`，并启用 `COOKIE_SECURE=true`。不要直接将默认本地配置用于公网部署。
 
-如果构建环境使用企业 HTTPS 代理，可用 Compose build secret `proxy_ca` 为两个构建阶段传入 CA PEM；普通本地构建不需要该 Secret。构建过程保持 TLS 验证，不将代理 CA 写入运行镜像。
+## 本地开发
 
-## 原生开发
+### 依赖
 
-需要 Go 1.25+、Node.js 22.12+、npm 和 Docker Compose。
+- Go 1.25+
+- Node.js 22.12+
+- npm
+- Docker Compose
+
+先初始化环境并启动开发用 MySQL：
 
 ```bash
 ./scripts/setup.sh
 docker compose -f compose.yaml -f compose.dev.yaml up -d --wait db
 ```
 
-终端 1（仓库根目录）：
+终端一：启动 Go API（在仓库根目录执行）
 
 ```bash
 set -a
@@ -113,7 +180,7 @@ cd backend
 go run ./cmd/server
 ```
 
-终端 2：
+终端二：启动前端开发服务器
 
 ```bash
 cd web
@@ -121,30 +188,33 @@ npm ci
 npm run dev
 ```
 
-打开 **http://localhost:5173**。Vite 将 API/Webhook 代理到本机 8080，浏览器仍使用同源会话。如果已经在 8080 运行 Compose 应用，请先停止其 Web/API 服务以避免端口冲突。
+访问 **http://localhost:5173**。Vite 会将 API 和 Webhook 请求代理到本机 Go 服务的 `8080` 端口。若完整 Compose 应用已经占用该端口，请先停止对应服务，避免端口冲突。
 
 ## 测试
 
-### Go 单元测试与真实 MySQL 集成测试
+### Go 测试
 
-测试会创建并清理各自的用户数据，建议使用独立开发/测试数据库，不要指向生产库。
+集成测试需要真实 MySQL 数据库。建议使用独立测试数据库，不要将测试指向生产数据。
 
 ```bash
 ./scripts/setup.sh
 docker compose -f compose.yaml -f compose.dev.yaml up -d --wait db
-# 等待 docker compose ps 中数据库显示 healthy
 ./scripts/test-go.sh
 cd backend
 go vet ./...
 ```
 
-未设置 `TEST_DATABASE_DSN` 时直接执行 `go test ./...` 会跳过 MySQL 集成测试，不能据此声称集成测试通过。`test-go.sh` 会明确设置连接串并执行 `go test -race ./... -count=1`。
+`scripts/test-go.sh` 会设置测试连接并运行：
 
-覆盖健康/数据库就绪、迁移幂等、认证校验与退出、Session 哈希存储/过期/轮换、Argon2id、CSRF、跨用户隔离、自定义方法、二进制 Body、请求体限制、脱敏、过滤搜索、暂停/删除、来源 IP、重放投递/持久化、SSRF 地址/DNS/端口策略、重定向与凭证剥离。重放成功测试使用真实本地 HTTP 接收器，通过受控 DNS/拨号注入验证公网策略后的投递，不依赖外部服务。
+```bash
+go test -race ./... -count=1
+```
 
-### Playwright
+如果未设置 `TEST_DATABASE_DSN`，直接运行部分 Go 测试可能跳过 MySQL 集成测试；不能仅凭这种结果认定集成测试已通过。
 
-先启动完整 Compose 应用，再运行：
+### 前端与端到端测试
+
+先启动完整 Compose 应用，再执行：
 
 ```bash
 cd web
@@ -154,47 +224,66 @@ BASE_URL=http://localhost:8080 npm test
 npm run build
 ```
 
-如果系统已安装 Chromium，可用 `CHROMIUM_PATH=/usr/bin/chromium BASE_URL=http://localhost:8080 npm test`。原生开发服务运行时可直接 `npm test` 使用 5173。
+测试使用真实 API 和本地数据库，不使用 API Mock。失败时会保留 Playwright 截图和 Trace。
 
-测试走真实注册、创建 Endpoint、发送 Webhook、查看 JSON/Raw/Query/脱敏头、拒绝元数据地址重放、搜索、改名、退出并重新登录、移动导航与删除。失败保留截图和 trace；浏览器测试数据仅写入配置的本地数据库，不使用 API mock。
+## 安全说明
 
-## 安全约束
+HookLab 包含多项基础安全控制，但它仍是一个 MVP 工具，不应被视为经过独立安全认证或渗透测试的生产级 Webhook 基础设施。
 
-- Argon2id 参数：64 MiB、3 次迭代、2 个线程，随机 16 字节盐。
-- Session 使用 256 位随机值；数据库仅存其 SHA-256，7 天到期。Cookie 为 HttpOnly、SameSite=Lax，可配置 Secure；登录轮换已有 Cookie，退出销毁服务端会话。
-- 注册、登录及所有管理写请求要求精确 `Origin`；登录后还必须携带 Session 绑定的 `X-CSRF-Token`。Webhook 接收路由单独使用 URL Token，不依赖浏览器 Session。
-- 默认脱敏 Authorization、Cookie、API-Key、Token、Secret、Signature、Credential、Password、Auth 等敏感请求头。Headers 脱敏不可恢复；Body 和 Query 原样保存，避免发送生产凭证。
-- API 日志仅记录方法、状态与耗时，不记录包含 Token 的请求 URL 或 Body。Nginx 仅接收静态页面请求且关闭访问日志，Webhook 不经过 Nginx。
-- 默认使用实际连接的来源 IP，忽略伪造转发头。如果外层另有 TLS 代理，显式配置 `TRUSTED_PROXIES` 并让该代理覆写外来转发头。
-- 重放只允许公网 HTTP:80、HTTPS:443，无 URL 凭证、无片段。拒绝私网、回环、链路本地、文档/基准/保留地址、IPv4 映射私网及 IPv6 隧道地址；全部 DNS 结果都必须安全，并固定到已校验 IP 拨号。
-- 重放不用环境 HTTP 代理，不跟随重定向，保留 TLS 验证；最长 10 秒，响应头最多 32 KiB，响应体最多读取 64 KiB，不保存响应 Body。
-- 重放转发原方法、Body 与非敏感非 hop-by-hop 头；不自动附加原始 Query。目标 URL 中填写需要的 Query。结果失败也会记录，外部请求可能产生真实业务副作用。
-- 认证每 IP 每分钟 20 次且最多 4 个并发哈希；捕获每 IP 每分钟 600 次，重放每 IP 每分钟 30 次。限流为单进程内存实现，重启重置。
+- **密码与会话**：密码使用 Argon2id；Session 使用随机值，数据库仅保存其 SHA-256 摘要。Cookie 设置 HttpOnly、SameSite=Lax，并可配置 Secure。
+- **CSRF 与来源校验**：注册、登录及管理写请求校验 Origin；登录后的管理请求还需要 Session 绑定的 CSRF Token。
+- **数据访问控制**：管理 API 在查询资源时同时校验所属用户；SQL 使用参数化查询。
+- **请求捕获**：限制请求体大小；默认对 Authorization、Cookie、Token、Secret、Password 等敏感请求头脱敏。Headers 脱敏不可恢复，但 Body 和 Query 会原样保存。
+- **来源 IP**：默认使用实际 TCP 连接来源，忽略未经信任的转发头。仅在代理配置可信且代理会覆盖外部转发头时设置 `TRUSTED_PROXIES`。
+- **事件重放与 SSRF 防护**：仅允许公网 HTTP/HTTPS 目标及标准端口；校验 DNS 解析结果并固定到已验证 IP；拒绝私网、回环和保留地址；不跟随重定向、不使用环境代理，并限制超时及响应大小。
+- **限流**：认证、Webhook 捕获和重放均有按来源 IP 的限流。当前限流为单进程内存实现，进程重启后重置。
 
-## API 摘要
+### 敏感数据注意事项
+
+Webhook Body 和 Query 会原样保存，可能包含业务数据或凭证。请勿将生产密钥、密码或个人敏感信息发送到不受信任的 HookLab 实例。
+
+当前 Endpoint Token 会以明文形式存储，以便工作台展示完整接收 URL。因此应限制数据库和备份的访问权限，并将数据库备份视为敏感数据。
+
+## API 概览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/healthz`, `/readyz` | 存活 / 数据库就绪 |
-| POST | `/api/auth/register`, `/api/auth/login`, `/api/auth/logout` | 认证 |
-| GET | `/api/auth/me` | 用户和 CSRF Token |
-| GET / POST | `/api/endpoints` | 列表 / 创建 |
-| PATCH / DELETE | `/api/endpoints/:id` | 修改名称（`active` 可省略，省略保留原状态）/ 级联删除 |
-| 任意方法 | `/h/:token[/path]` | 接收 Webhook |
-| GET | `/api/events` | `endpoint_id`、`method`、`q`、`before`；方法按二进制比较区分大小写；每页 50 条，返回 `next_cursor` |
-| GET | `/api/events/:id` | 详情，Body 在 `body_base64` |
-| POST | `/api/events/:id/replay` | JSON `{"target":"https://..."}` |
-| GET | `/api/events/:id/replays` | 最近 50 条重放结果 |
+| `GET` | `/healthz`、`/readyz` | 存活与就绪检查 |
+| `POST` | `/api/auth/register`、`/api/auth/login`、`/api/auth/logout` | 用户认证 |
+| `GET` | `/api/auth/me` | 当前用户与 CSRF Token |
+| `GET`、`POST` | `/api/endpoints` | Endpoint 列表与创建 |
+| `PATCH`、`DELETE` | `/api/endpoints/:id` | 更新与删除 Endpoint |
+| 任意 HTTP Method | `/h/:token[/path]` | 接收 Webhook |
+| `GET` | `/api/events` | 事件列表与筛选 |
+| `GET` | `/api/events/:id` | 事件详情 |
+| `POST` | `/api/events/:id/replay` | 重放事件 |
+| `GET` | `/api/events/:id/replays` | 查看最近重放记录 |
 
-## MVP 边界
+事件列表支持 `endpoint_id`、`method`、`q` 和 `before` 参数；每页最多返回 50 条。HTTP Method 筛选区分大小写。事件详情中的原始 Body 以 Base64 字段返回。
 
-本版本已实现四阶段核心流程。为支持 TRACE、CONNECT、大小写与标点自定义方法，Go 直接接收公网 HTTP，Nginx 只提供内部静态页面。暂未加入密码找回/邮箱验证、Token 轮换、自动保留期清理、大数据量全文索引、WebSocket 推送、批量或计划重放、重试队列和多实例共享限流。当前搜索是用户范围内的参数化 SQL 内容匹配，适合 MVP 数据规模；Endpoint Token 明文存储用于展示完整接收 URL，数据库备份也应按敏感数据保护。
+## 当前限制与后续规划
 
-## 本次验证记录
+当前版本适合个人开发、学习和受控测试环境。以下能力尚未纳入 v1.0：
 
-2026-11-09，在真实 MySQL 8.4 与正式 Compose 镜像上完成：
+- 自动事件保留期清理与用户存储配额
+- Endpoint Token 轮换
+- 密码找回与邮箱验证
+- 批量或计划重放、自动重试队列
+- 大规模全文检索与多实例共享限流
+- WebSocket 实时推送
 
-- Go：18 个顶层测试，含子测试共 47 项通过；`-race`、`go vet`、静态二进制构建通过。新增回归覆盖 PATCH 状态保留/显式停用、Host 持久化和 HTTP Method 大小写筛选。
-- 前端：TypeScript 检查、Vite 生产构建、代码格式检查通过。
-- Playwright：4 项测试通过，包括完整业务链路、未登录/失败登录、大载荷预览和忙碌弹窗。
-- 容器：MySQL、API、Web 健康检查通过；12 种 HTTP 方法通过公网入口接收并持久化，CSP、来源 IP 与安全检查通过。
+在增加数据保留策略、存储配额和多实例限流前，不建议将服务作为无约束的公网接收端开放给不特定用户。
+
+## 版本验证
+
+v1.0 MVP 于 2026-11-09 完成验证，测试环境为 MySQL 8.4 和 Docker Compose：
+
+- Go：18 个顶层测试，含子测试共 47 项通过；Race Detector、`go vet` 通过。
+- 前端：TypeScript 检查、Vite 生产构建通过。
+- Playwright：4 项端到端测试通过。
+- 容器：MySQL、API、Web 服务构建成功，健康检查通过。
+- 回归测试：覆盖 PATCH 状态保留、Host 持久化及 HTTP Method 大小写筛选。
+
+---
+
+**Repository:** [github.com/Lcpt7/HookLab](https://github.com/Lcpt7/HookLab)
