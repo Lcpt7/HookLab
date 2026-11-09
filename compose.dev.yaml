@@ -1,0 +1,5 @@
+# Only for native development and integration tests. Production leaves MySQL private.
+services:
+  db:
+    ports:
+      - "127.0.0.1:3306:3306"
